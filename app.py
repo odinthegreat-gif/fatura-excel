@@ -11,6 +11,8 @@ from openpyxl import load_workbook
 from google import genai
 from google.genai import types
 import pandas as pd
+from pydantic import BaseModel, Field
+from typing import List, Optional, Literal
 
 # ── Sayfa ayarları ──────────────────────────────────────────────
 st.set_page_config(
@@ -87,4 +89,104 @@ COL_MAP = {
 }
 
 # ── PDF okuma yardımcıları ───────────────────────────────────────
-def extract_pdf_text(uploaded_file)
+def extract_pdf_text(uploaded_file) -> str:
+    """pdfplumber ile tüm sayfaları metin olarak döndürür."""
+    pages = []
+    with pdfplumber.open(uploaded_file) as pdf:
+        for page in pdf.pages:
+            t = page.extract_text()
+            if t:
+                pages.append(t)
+    return "\n\n--- SAYFA SONU ---\n\n".join(pages)
+
+# ── Gemini Pydantic Şeması (Structured Output için) ────────────────
+class FaturaItem(BaseModel):
+    tesis: Literal["METYX MNS2 ŞUBESİ", "MANİSA ŞUBESİ"]
+    ay: int = Field(description="1-12 arası fatura dönem ayı")
+    yil: int = Field(description="4 haneli yıl")
+    fatura_tipi: Literal["elektrik", "su", "dogalgaz", "atik", "atiksu", "izin_belgesi", "altyapi", "diger"]
+    miktar: Optional[float] = None
+    birim: Optional[Literal["KWH", "M3", "ADET"]] = None
+    tutar_kdv_dahil: float = Field(description="Ödenecek toplam tutar")
+
+class FaturaResponse(BaseModel):
+    faturalar: List[FaturaItem]
+
+# ── Gemini ile fatura ayrıştırma ─────────────────────────────────
+SYSTEM_PROMPT = """
+Sen bir fatura veri çıkarma uzmanısın. Sana Türkçe OSB (Organize Sanayi Bölgesi) faturaları verilecek.
+Fatura tarihi: son ödeme tarihi değil, FATURA TARİHİ'nden ayı belirle.
+Mutfak aboneliği MANİSA ŞUBESİ'ne aittir.
+MEL fatura numarası = elektrik
+MSU fatura numarası = su (şebeke suyu)
+MDG fatura numarası = doğalgaz
+MKT fatura numarası = evsel katı atık
+MAT fatura numarası = atıksu (KOI, AKM, YAĞ&GRES içerir)
+GNL/MTA fatura numarası = diğer hizmetler (izin belgesi, altyapı)
+"""
+
+def parse_invoices_with_gemini(pdf_text: str) -> list[dict]:
+    """Gemini API ile faturaları kesin JSON formatında ayrıştır."""
+    # Streamlit Cloud üzerindeki Secrets'ta tanımlı olan GEMINI_API_KEY'i otomatik yakalar.
+    client = genai.Client()
+    
+    response = client.models.generate_content(
+        model='gemini-2.5-flash',
+        contents=f"Aşağıdaki PDF fatura metinlerini analiz et:\n\n{pdf_text}",
+        config=types.GenerateContentConfig(
+            system_instruction=SYSTEM_PROMPT,
+            response_mime_type="application/json",
+            response_schema=FaturaResponse,
+            temperature=0.1
+        ),
+    )
+    
+    data = json.loads(response.text)
+    return data.get("faturalar", [])
+
+# ── Excel doldurma ───────────────────────────────────────────────
+def fill_excel(template_bytes: bytes, invoices: list[dict]) -> bytes:
+    """Şablonu doldurup dolu Excel döndürür."""
+    wb = load_workbook(io.BytesIO(template_bytes))
+
+    for inv in invoices:
+        sheet_name = None
+        tesis_val = (inv.get("tesis") or "").upper()
+        for sn, keywords in SHEETS.items():
+            if any(k.upper() in tesis_val for k in keywords):
+                sheet_name = sn
+                break
+        if sheet_name is None or sheet_name not in wb.sheetnames:
+            continue
+
+        ws = wb[sheet_name]
+        ay_num = inv.get("ay")
+        if not ay_num:
+            continue
+        row = MONTHS_ROW.get(MONTHS_TR.get(ay_num, ""), None)
+        if row is None:
+            continue
+
+        tip = (inv.get("fatura_tipi") or "").lower()
+        miktar = inv.get("miktar")
+        tutar = inv.get("tutar_kdv_dahil")
+
+        if tip == "elektrik":
+            if miktar:  ws.cell(row=row, column=COL_MAP["elektrik_kwh"]).value = miktar
+            if tutar:   ws.cell(row=row, column=COL_MAP["elektrik_tl"]).value  = tutar
+        elif tip == "su":
+            if miktar:  ws.cell(row=row, column=COL_MAP["su_m3"]).value = miktar
+            if tutar:   ws.cell(row=row, column=COL_MAP["su_tl"]).value  = tutar
+        elif tip == "dogalgaz":
+            prev_kwh = ws.cell(row=row, column=COL_MAP["dogalgaz_kwh"]).value or 0
+            prev_tl  = ws.cell(row=row, column=COL_MAP["dogalgaz_tl"]).value  or 0
+            if miktar:  ws.cell(row=row, column=COL_MAP["dogalgaz_kwh"]).value = prev_kwh + miktar
+            if tutar:   ws.cell(row=row, column=COL_MAP["dogalgaz_tl"]).value  = prev_tl  + tutar
+        elif tip == "atik":
+            if miktar:  ws.cell(row=row, column=COL_MAP["atik_adet"]).value = miktar
+            if tutar:   ws.cell(row=row, column=COL_MAP["atik_tl"]).value   = tutar
+        elif tip == "atiksu":
+            prev_m3 = ws.cell(row=row, column=COL_MAP["atiksu_m3"]).value or 0
+            prev_tl = ws.cell(row=row, column=COL_MAP["atiksu_tl"]).value or 0
+            if miktar:  ws.cell(row=row, column=COL_MAP["atiksu_m3"]).value = prev_m3 + miktar
+            if tutar:   ws.cell(row=row,
