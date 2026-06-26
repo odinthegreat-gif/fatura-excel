@@ -1,6 +1,6 @@
 # 📊 Fatura → Excel Dönüştürücü
 
-MANİSA OSB faturalarını otomatik olarak Excel'e aktaran Streamlit uygulaması.
+faturalarını otomatik olarak Excel'e aktaran Streamlit uygulaması.
 
 ## Kurulum
 
