@@ -1,7 +1,6 @@
 # 📊 Fatura → Excel Dönüştürücü
 
-faturalarını otomatik olarak Excel'e aktaran Streamlit uygulaması.
-
+asdfa
 ## Kurulum
 
 ```bash
